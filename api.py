@@ -184,7 +184,6 @@ def save_article(article):
             'id': article_id,
             'title': article.get('title', ''),
             'content': article.get('content', ''),
-            'content_preview': content_preview,  # 4-5 line summary
             'full_text': article.get('full_text', article.get('content', '')),
             'created_at': article.get('created_at'),
             'sources': article.get('sources', []),  # JSONB accepts Python lists
@@ -194,7 +193,60 @@ def save_article(article):
         }
         
         # Use upsert to handle both insert and update
-        response = supabase_client.table('articles').upsert(supabase_data).execute()
+        # Try with content_preview first, fallback without it if column doesn't exist
+        try:
+            # First attempt: include content_preview
+            supabase_data_with_preview = {**supabase_data, 'content_preview': content_preview}
+            response = supabase_client.table('articles').upsert(supabase_data_with_preview).execute()
+        except Exception as upsert_error:
+            # Check if error is about missing content_preview column
+            error_str = str(upsert_error)
+            
+            # Try to extract error code and message from various formats
+            error_code = ''
+            error_message = ''
+            
+            # Check if error has attributes
+            if hasattr(upsert_error, 'code'):
+                error_code = str(upsert_error.code)
+            if hasattr(upsert_error, 'message'):
+                error_message = str(upsert_error.message)
+            
+            # Check if error string contains a dict representation
+            if "'code'" in error_str or '"code"' in error_str:
+                try:
+                    import re
+                    # Try to extract code from string like {'code': 'PGRST204', ...}
+                    code_match = re.search(r"['\"]code['\"]\s*:\s*['\"]([^'\"]+)['\"]", error_str)
+                    if code_match:
+                        error_code = code_match.group(1)
+                    # Try to extract message
+                    msg_match = re.search(r"['\"]message['\"]\s*:\s*['\"]([^'\"]+)['\"]", error_str)
+                    if msg_match:
+                        error_message = msg_match.group(1)
+                except:
+                    pass
+            
+            # Check for PGRST204 error code or content_preview in error message
+            is_content_preview_error = (
+                'content_preview' in error_str.lower() or 
+                'content_preview' in error_message.lower() or
+                'PGRST204' in error_str or 
+                error_code == 'PGRST204' or
+                'schema cache' in error_str.lower() or
+                'schema cache' in error_message.lower()
+            )
+            
+            if is_content_preview_error:
+                print("⚠️  content_preview column not found in database. Saving without it...")
+                print("💡 Run the migration SQL in Supabase SQL Editor:")
+                print("   File: add_content_preview_column.sql")
+                print("   Or run: ALTER TABLE articles ADD COLUMN IF NOT EXISTS content_preview TEXT;")
+                # Remove content_preview and try again
+                response = supabase_client.table('articles').upsert(supabase_data).execute()
+            else:
+                # Re-raise if it's a different error
+                raise
         
         if response.data:
             image_count = len(article_images)
@@ -728,7 +780,7 @@ def scheduler_worker():
         
         # Wait 30 minutes (1800 seconds)
         print(f"[{datetime.now()}] Scheduler sleeping for 30 minutes (1800 seconds)...")
-        time.sleep(18000)
+        time.sleep(60)
 
 @app.route('/api/generate-article', methods=['POST'])
 def generate_article():
