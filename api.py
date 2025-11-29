@@ -21,7 +21,8 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')  # Should be service_role key for backe
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise EnvironmentError(
         "SUPABASE_URL and SUPABASE_KEY are required. "
-        "Add them to your .env file. Use service_role key for backend operations."
+        "Add them as environment variables (Railway: Variables tab). "
+        "Use service_role key for backend operations."
     )
 
 try:
@@ -43,17 +44,57 @@ def load_articles():
         if response.data:
             for row in response.data:
                 # Convert Supabase row to article format
+                # Handle JSONB columns - ensure they're properly converted to lists
+                images_data = row.get('images')
+                if images_data is None:
+                    images_data = []
+                elif not isinstance(images_data, list):
+                    # If it's a string, try to parse it
+                    if isinstance(images_data, str):
+                        try:
+                            import json
+                            images_data = json.loads(images_data)
+                        except:
+                            images_data = []
+                    else:
+                        images_data = []
+                
+                sources_data = row.get('sources')
+                if sources_data is None:
+                    sources_data = []
+                elif not isinstance(sources_data, list):
+                    if isinstance(sources_data, str):
+                        try:
+                            import json
+                            sources_data = json.loads(sources_data)
+                        except:
+                            sources_data = []
+                    else:
+                        sources_data = []
+                
+                # Generate content_preview if not present (for backward compatibility)
+                content_preview = row.get('content_preview')
+                if not content_preview:
+                    # Generate preview from content if not stored
+                    content_preview = generate_content_preview(row.get('content', ''), max_lines=5, max_chars_per_line=100)
+                
                 article = {
                     'id': row.get('id'),
                     'title': row.get('title'),
                     'content': row.get('content'),
+                    'content_preview': content_preview,  # 4-5 line summary
                     'full_text': row.get('full_text', ''),
                     'created_at': row.get('created_at'),
-                    'sources': row.get('sources') if isinstance(row.get('sources'), list) else [],
-                    'images': row.get('images') if isinstance(row.get('images'), list) else [],
+                    'sources': sources_data,
+                    'images': images_data,  # Ensure it's always a list
                     'topics': row.get('topics') if isinstance(row.get('topics'), list) else [],
                     'related_articles': row.get('related_articles') if isinstance(row.get('related_articles'), list) else []
                 }
+                
+                # Debug: Log image count for each article
+                if article.get('images'):
+                    print(f"📸 Article '{article.get('title', 'Unknown')[:50]}' has {len(article.get('images', []))} image(s)")
+                
                 if article.get('id') and article.get('title'):
                     articles.append(article)
         print(f"✅ Loaded {len(articles)} articles from Supabase")
@@ -81,13 +122,30 @@ def save_article(article):
         if not isinstance(article_images, list):
             article_images = []
         
+        # Validate image URLs before saving
+        validated_article_images = []
+        for img_url in article_images:
+            if not img_url or not isinstance(img_url, str):
+                continue
+            # Clean and validate URL
+            img_url = img_url.strip().rstrip('.,;)\'"<>')
+            if img_url.startswith('http') and len(img_url) > 10:
+                # Check if it looks like a valid image URL
+                img_url_lower = img_url.lower()
+                if (any(ext in img_url_lower for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp']) or
+                    any(keyword in img_url_lower for keyword in ['/image', '/photo', '/img', '/picture', '/media']) or
+                    any(domain in img_url_lower for domain in ['imgur', 'flickr', 'unsplash', 'pexels', 'getty', 'cdn', 'media', 'static', 'cloudinary'])):
+                    validated_article_images.append(img_url)
+        
+        article_images = validated_article_images
+        
         # Log images being saved
         if article_images:
-            print(f"📸 Saving {len(article_images)} image(s) to Supabase:")
+            print(f"📸 Saving {len(article_images)} validated image(s) to Supabase:")
             for idx, img_url in enumerate(article_images[:5], 1):  # Show first 5
                 print(f"   {idx}. {img_url[:100]}")
         else:
-            print("⚠️  WARNING: No images found in article data!")
+            print("⚠️  WARNING: No valid images found in article data!")
             print("⚠️  Attempting to extract images from full_text as fallback...")
             
             # Try to extract from full_text as last resort
@@ -97,14 +155,18 @@ def save_article(article):
                 img_patterns = [
                     r'https?://[^\s<>"\)]+\.(?:jpg|jpeg|png|gif|webp|svg|bmp)(?:\?[^\s<>"\)]*)?',
                     r'https?://[^\s<>"\)]+image[^\s<>"\)]*(?:\.(?:jpg|jpeg|png|gif|webp))?',
+                    r'https?://[^\s<>"\)]+/image[s]?/[^\s<>"\)]+',
+                    r'https?://[^\s<>"\)]+/photo[s]?/[^\s<>"\)]+',
                 ]
                 for pattern in img_patterns:
                     matches = re.findall(pattern, full_text, re.IGNORECASE)
                     for match in matches:
                         if isinstance(match, str) and match.startswith('http'):
-                            article_images.append(match)
-                            print(f"✅ Found image in full_text: {match[:80]}...")
-                            break
+                            # Validate before adding
+                            match = match.strip().rstrip('.,;)\'"<>')
+                            if len(match) > 10 and match not in article_images:
+                                article_images.append(match)
+                                print(f"✅ Found image in full_text: {match[:80]}...")
                     if article_images:
                         break
             
@@ -112,11 +174,17 @@ def save_article(article):
                 print("❌ ERROR: Article has no images after all extraction attempts!")
                 print("⚠️  Article will be saved, but it should have at least one image.")
         
+        # Generate content_preview if not present
+        content_preview = article.get('content_preview')
+        if not content_preview:
+            content_preview = generate_content_preview(article.get('content', ''), max_lines=5, max_chars_per_line=100)
+        
         # Prepare data for Supabase (JSONB columns accept Python lists/dicts directly)
         supabase_data = {
             'id': article_id,
             'title': article.get('title', ''),
             'content': article.get('content', ''),
+            'content_preview': content_preview,  # 4-5 line summary
             'full_text': article.get('full_text', article.get('content', '')),
             'created_at': article.get('created_at'),
             'sources': article.get('sources', []),  # JSONB accepts Python lists
@@ -148,6 +216,75 @@ def delete_old_articles():
     """Articles are never deleted - all articles are permanently saved"""
     # This function does nothing - articles are never deleted
     pass
+
+def generate_content_preview(content, max_lines=5, max_chars_per_line=100):
+    """Generate a 4-5 line summary/preview of the article content"""
+    if not content:
+        return "No preview available"
+    
+    max_total_chars = max_lines * max_chars_per_line
+    
+    # Split content into paragraphs
+    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+    
+    # If we have paragraphs, take first few and create summary
+    if paragraphs:
+        preview_lines = []
+        total_chars = 0
+        
+        for para in paragraphs[:max_lines]:
+            # Clean paragraph - remove extra whitespace
+            para = ' '.join(para.split())
+            
+            # If paragraph is too long, truncate it
+            if len(para) > max_chars_per_line:
+                # Try to truncate at sentence boundary
+                sentences = para.split('. ')
+                current_line = ""
+                for sentence in sentences:
+                    if len(current_line) + len(sentence) + 2 <= max_chars_per_line:
+                        if current_line:
+                            current_line += ". " + sentence
+                        else:
+                            current_line = sentence
+                    else:
+                        if current_line:
+                            preview_lines.append(current_line)
+                            total_chars += len(current_line)
+                            if len(preview_lines) >= max_lines or total_chars >= max_total_chars:
+                                break
+                        current_line = sentence
+                
+                if current_line and len(preview_lines) < max_lines:
+                    preview_lines.append(current_line)
+                    total_chars += len(current_line)
+            else:
+                preview_lines.append(para)
+                total_chars += len(para)
+            
+            if len(preview_lines) >= max_lines or total_chars >= max_total_chars:
+                break
+        
+        # Join lines and ensure it's not too long
+        preview = ' '.join(preview_lines)
+        if len(preview) > max_total_chars:
+            preview = preview[:max_total_chars].rsplit(' ', 1)[0] + '...'
+        
+        return preview
+    
+    # Fallback: if no paragraphs, take first N sentences
+    sentences = content.split('. ')
+    preview_sentences = []
+    for sentence in sentences[:max_lines]:
+        cleaned = sentence.strip()
+        if cleaned:
+            preview_sentences.append(cleaned)
+    
+    preview = '. '.join(preview_sentences)
+    if len(preview) > max_total_chars:
+        preview = preview[:max_total_chars].rsplit(' ', 1)[0] + '...'
+    
+    return preview
 
 def extract_topics(title, content):
     """Extract main topics/keywords from article title and content"""
@@ -274,23 +411,79 @@ def parse_article(result_text):
         if not images_section:
             images_section = article_text.split("Image:")[-1] if "Image:" in article_text else ""
         
+        # Split by Sources: to stop at sources section
+        if "Sources:" in images_section:
+            images_section = images_section.split("Sources:")[0]
+        elif "Source:" in images_section:
+            images_section = images_section.split("Source:")[0]
+        
         for line in images_section.split('\n'):
             line = line.strip()
-            if line and 'http' in line:
+            # Handle both "Image: https://..." and just "https://..." formats
+            if line:
+                # Remove "Image:" prefix if present
+                if line.lower().startswith('image:'):
+                    line = line[6:].strip()  # Remove "Image:" prefix
+                
                 # Extract URL from line
-                url_match = re.search(r'https?://[^\s<>"]+', line)
-                if url_match:
-                    img_url = url_match.group(0)
-                    # Clean up URL
-                    img_url = img_url.rstrip('.,;)\'"')
-                    if img_url not in images:
-                        images.append(img_url)
+                if 'http' in line:
+                    url_match = re.search(r'https?://[^\s<>"]+', line)
+                    if url_match:
+                        img_url = url_match.group(0)
+                        # Clean up URL
+                        img_url = img_url.rstrip('.,;)\'"')
+                        if img_url.startswith('http') and img_url not in images:
+                            images.append(img_url)
+                            print(f"✅ Extracted image from Images section: {img_url[:80]}...")
     
     # Remove duplicates and invalid URLs
     images = list(dict.fromkeys(images))  # Remove duplicates while preserving order
-    images = [img for img in images if img.startswith('http') and len(img) > 10]  # Filter valid URLs
     
-    print(f"📸 Extracted {len(images)} image URL(s) from article")
+    # Validate and clean URLs
+    validated_images = []
+    for img_url in images:
+        if not img_url or not isinstance(img_url, str):
+            continue
+        
+        # Must start with http/https
+        if not img_url.startswith('http'):
+            continue
+        
+        # Must be at least 10 characters
+        if len(img_url) < 10:
+            continue
+        
+        # Clean up URL - remove common trailing characters
+        img_url = img_url.rstrip('.,;)\'"<>')
+        
+        # Remove common invalid patterns
+        if any(invalid in img_url.lower() for invalid in ['placeholder', 'default', 'none', 'null', 'undefined']):
+            continue
+        
+        # Check if URL looks like an image URL
+        # Either has image extension, or contains image-related keywords, or from known image domains
+        img_url_lower = img_url.lower()
+        is_image_url = (
+            any(ext in img_url_lower for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.jfif']) or
+            any(keyword in img_url_lower for keyword in ['/image', '/photo', '/img', '/picture', '/media']) or
+            any(domain in img_url_lower for domain in ['imgur', 'flickr', 'unsplash', 'pexels', 'getty', 'cdn', 'media', 'static', 'cloudinary', 'images.unsplash'])
+        )
+        
+        if is_image_url:
+            validated_images.append(img_url)
+        else:
+            print(f"⚠️  Skipped non-image URL: {img_url[:80]}...")
+    
+    images = validated_images
+    
+    # Log extracted images for debugging
+    print(f"📸 Extracted {len(images)} valid image URL(s) from article")
+    if images:
+        for idx, img_url in enumerate(images[:3], 1):
+            print(f"   Image {idx}: {img_url[:100]}")
+    else:
+        print("   ⚠️  WARNING: No valid images extracted from article text!")
+        print("   🔍 Checking if images are in full_text...")
     
     # Extract title - try multiple methods
     title = "Flash News: Top Global Events"  # Default fallback
@@ -386,9 +579,13 @@ def parse_article(result_text):
     # Extract topics from the article
     topics = extract_topics(title, content)
     
+    # Generate content preview (4-5 line summary)
+    content_preview = generate_content_preview(content, max_lines=5, max_chars_per_line=100)
+    
     return {
         "title": title,
         "content": content,
+        "content_preview": content_preview,  # 4-5 line summary for preview
         "sources": sources,
         "images": images[:5] if images else [],  # Limit to 5 images max
         "topics": topics,  # Store topics for duplicate detection
@@ -451,51 +648,56 @@ def generate_article_task():
         
         # Ensure at least one image is present
         image_count = len(article_data.get('images', []))
-        print(f"[{datetime.now()}] 📸 Article contains {image_count} image(s)")
+        print(f"[{datetime.now()}] 📸 Article contains {image_count} image(s) after parsing")
         
         if image_count == 0:
             print(f"[{datetime.now()}] ⚠️  WARNING: No images found in article!")
-            print(f"[{datetime.now()}] 🔍 Attempting to extract images from sources...")
+            print(f"[{datetime.now()}] 🔍 Attempting to extract images from full_text...")
             
-            # Try to extract images from sources if available
-            sources = article_data.get('sources', [])
-            for source in sources:
-                source_url = source.get('url', '')
-                # Try to find image URLs in source URLs (some sources have image endpoints)
-                if source_url and any(domain in source_url.lower() for domain in ['bbc', 'reuters', 'cnn', 'guardian', 'nytimes']):
-                    # These news sites often have image CDNs - try to construct image URL
-                    # This is a fallback - ideally images should come from the article content
-                    pass
-            
-            # If still no images, try to extract from full_text
-            if image_count == 0 and article_data.get('full_text'):
+            # If still no images, try to extract from full_text with more aggressive patterns
+            if article_data.get('full_text'):
                 import re
                 full_text = article_data.get('full_text', '')
-                # Look for any image URLs in full_text
+                
+                # More comprehensive image URL patterns
                 img_patterns = [
-                    r'https?://[^\s<>"\)]+\.(?:jpg|jpeg|png|gif|webp|svg|bmp)(?:\?[^\s<>"\)]*)?',
+                    r'https?://[^\s<>"\)]+\.(?:jpg|jpeg|png|gif|webp|svg|bmp|jfif)(?:\?[^\s<>"\)]*)?',
                     r'https?://[^\s<>"\)]+image[^\s<>"\)]*(?:\.(?:jpg|jpeg|png|gif|webp))?',
+                    r'https?://[^\s<>"\)]+/image[s]?/[^\s<>"\)]+',
+                    r'https?://[^\s<>"\)]+/photo[s]?/[^\s<>"\)]+',
+                    r'https?://[^\s<>"\)]+/media/[^\s<>"\)]+',
+                    r'https?://[^\s<>"\)]+/img/[^\s<>"\)]+',
+                    r'https?://[^\s<>"\)]+cdn[^\s<>"\)]+\.(?:jpg|jpeg|png|gif|webp)',
                 ]
+                
+                found_images = []
                 for pattern in img_patterns:
                     matches = re.findall(pattern, full_text, re.IGNORECASE)
                     for match in matches:
                         if isinstance(match, str) and match.startswith('http'):
-                            if 'images' not in article_data:
-                                article_data['images'] = []
-                            if match not in article_data['images']:
-                                article_data['images'].append(match)
-                                image_count += 1
-                                print(f"[{datetime.now()}] ✅ Found image in full_text: {match[:80]}...")
-                                break
-                    if image_count > 0:
-                        break
+                            # Clean and validate
+                            match = match.strip().rstrip('.,;)\'"<>')
+                            if len(match) > 10 and match not in found_images:
+                                # Additional validation
+                                match_lower = match.lower()
+                                if (any(ext in match_lower for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp']) or
+                                    any(keyword in match_lower for keyword in ['/image', '/photo', '/img', '/picture', '/media', 'cdn', 'static'])):
+                                    found_images.append(match)
+                                    print(f"[{datetime.now()}] ✅ Found image in full_text: {match[:80]}...")
+                
+                if found_images:
+                    article_data['images'] = found_images
+                    image_count = len(found_images)
+                    print(f"[{datetime.now()}] ✅ Extracted {image_count} image(s) from full_text")
         
         if image_count > 0:
+            print(f"[{datetime.now()}] 📸 Final image count: {image_count}")
             for idx, img_url in enumerate(article_data.get('images', [])[:3], 1):
-                print(f"[{datetime.now()}]   Image {idx}: {img_url[:80]}...")
+                print(f"[{datetime.now()}]   Image {idx}: {img_url[:100]}")
         else:
-            print(f"[{datetime.now()}] ❌ ERROR: Article has no images! This should not happen.")
-            print(f"[{datetime.now()}] ⚠️  Article will be saved without images, but this is not ideal.")
+            print(f"[{datetime.now()}] ❌ ERROR: Article has no images after all extraction attempts!")
+            print(f"[{datetime.now()}] ⚠️  Article will be saved without images.")
+            print(f"[{datetime.now()}] 💡 Tip: Check if CrewAI is including images in the article output.")
         
         # Save article to Supabase
         if save_article(article_data):
@@ -513,13 +715,19 @@ def generate_article_task():
 
 def scheduler_worker():
     """Background worker that runs article generation every 30 minutes"""
+    print(f"[{datetime.now()}] Scheduler worker started. Will generate articles every 30 minutes.")
     while True:
         try:
             generate_article_task()
         except Exception as e:
-            print(f"Error in scheduler: {str(e)}")
+            print(f"[{datetime.now()}] ERROR in scheduler: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Continue running even if one generation fails
+            print(f"[{datetime.now()}] Scheduler will continue and retry in 30 minutes...")
         
         # Wait 30 minutes (1800 seconds)
+        print(f"[{datetime.now()}] Scheduler sleeping for 30 minutes (1800 seconds)...")
         time.sleep(60)
 
 @app.route('/api/generate-article', methods=['POST'])

@@ -14,7 +14,7 @@ load_dotenv()
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise EnvironmentError(
-        "GEMINI_API_KEY missing. Add it to a .env file or the environment."
+        "GEMINI_API_KEY missing. Add it as an environment variable (Railway: Variables tab)."
     )
 
 # Get model from environment or use default (gemini-2.0-flash-lite has better free tier limits: 30 RPM, 1M TPM)
@@ -583,9 +583,13 @@ if __name__ == "__main__":
             "full_text": article_text
         }
         
-        with open('latest_article.json', 'w', encoding='utf-8') as f:
-            json.dump(article_data, f, indent=2, ensure_ascii=False)
-        
-        print("\nArticle saved to latest_article.json")
+        # Only save to file if running locally (not in production)
+        if os.getenv('FLASK_ENV') != 'production':
+            try:
+                with open('latest_article.json', 'w', encoding='utf-8') as f:
+                    json.dump(article_data, f, indent=2, ensure_ascii=False)
+                print("\nArticle saved to latest_article.json")
+            except Exception as e:
+                print(f"\nNote: Could not save to file (this is normal in production): {e}")
     except Exception as e:
         print(f"Error saving article: {e}")
