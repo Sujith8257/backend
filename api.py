@@ -520,7 +520,7 @@ def scheduler_worker():
             print(f"Error in scheduler: {str(e)}")
         
         # Wait 30 minutes (1800 seconds)
-        time.sleep(18000)
+        time.sleep(60)
 
 @app.route('/api/generate-article', methods=['POST'])
 def generate_article():
