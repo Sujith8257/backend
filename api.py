@@ -728,7 +728,7 @@ def scheduler_worker():
         
         # Wait 30 minutes (1800 seconds)
         print(f"[{datetime.now()}] Scheduler sleeping for 30 minutes (1800 seconds)...")
-        time.sleep(60)
+        time.sleep(18000)
 
 @app.route('/api/generate-article', methods=['POST'])
 def generate_article():
